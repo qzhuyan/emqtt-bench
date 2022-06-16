@@ -56,6 +56,9 @@
           "set the message content for publish"},
          {qos, $q, "qos", {integer, 0},
           "subscribe qos"},
+         {qoe, $Q, "qoe", {boolean, false},
+          "Enable QoE tracking"},
+         {nst_dets_file, undefined, "load-qst", string, "load quic session tickets from dets file"},
          {retain, $r, "retain", {boolean, false},
           "retain message"},
          {keepalive, $k, "keepalive", {integer, 300},
@@ -122,6 +125,9 @@
           "topic subscribe, support %u, %c, %i variables"},
          {qos, $q, "qos", {integer, 0},
           "subscribe qos"},
+         {nst_dets_file, undefined, "load-qst", string, "load quic session tickets from dets file"},
+         {qoe, $Q, "qoe", {boolean, false},
+          "Enable QoE tracking"},
          {username, $u, "username", string,
           "username for connecting to server"},
          {password, $P, "password", string,
@@ -171,6 +177,9 @@
          {count, $c, "count", {integer, 200},
           "max count of clients"},
          {startnumber, $n, "startnumber", {integer, 0}, "start number"},
+         {nst_dets_file, undefined, "load-qst", string, "load quic session tickets from dets file"},
+         {qoe, $Q, "qoe", {boolean, false},
+          "Enable QoE tracking"},
          {interval, $i, "interval", {integer, 10},
           "interval of connecting to the broker"},
          {username, $u, "username", string,
@@ -296,6 +305,14 @@ main(conn, Opts) ->
     start(conn, Opts).
 
 start(PubSub, Opts) ->
+    ets:new(quic_clients_nsts, [named_table, public, ordered_set]),
+    case proplists:get_value(nst_dets_file, Opts, undefined) of
+       undefined ->
+          {ok, _DRef} = dets:open_file(dets_quic_nsts, [{file, "/tmp/quic_clients_nsts.dets"}]);
+       Filename ->
+          {ok, _DRef} = dets:open_file(dets_quic_nsts, [{file, Filename}]),
+          ets:from_dets(quic_clients_nsts, dets_quic_nsts)
+    end,
     prepare(PubSub, Opts), init(),
     IfAddr = proplists:get_value(ifaddr, Opts),
     Host = proplists:get_value(host, Opts),
@@ -372,6 +389,7 @@ main_loop(Uptime, Count0) ->
         publish_complete ->
             return_print("publish complete", []);
         stats ->
+            ets:to_dets(quic_clients_nsts, dets_quic_nsts),
             print_stats(Uptime),
             garbage_collect(),
             main_loop(Uptime, Count0);
@@ -518,6 +536,7 @@ connect(Parent, N, PubSub, Opts) ->
                 {tcp_opts, tcp_opts(Opts)},
                 {ssl_opts, ssl_opts(Opts)}]
         ++ session_property_opts(Opts)
+        ++ quic_opts(Opts, ClientId)
         ++ mqtt_opts(Opts),
     MqttOpts1 = case PubSub of
                   conn -> [{force_ping, true} | MqttOpts];
@@ -664,8 +683,18 @@ subscribe(Client, N, Opts) ->
     Qos = proplists:get_value(qos, Opts),
     Res = emqtt:subscribe(Client, [{Topic, Qos} || Topic <- topics_opt(Opts)]),
     case Res of
-        {ok, _, _} ->
-            ok;
+       {ok, _, _} ->
+          case proplists:get_value(qoe, emqtt:info(Client)) of
+             false ->
+                ok;
+             #{ initialized := StartTs
+              , handshaked := HSTs
+              , connected := ConnTs
+              , subscribed := SubTs
+              }  ->
+                io:format("~n latency: handshake: ~p conn: ~p , sub: ~p~n", [HSTs - StartTs, ConnTs - StartTs, SubTs - StartTs]),
+                ok
+          end;
         {error, Reason} ->
             io:format("client(~w): subscribe error - ~p~n", [N, Reason]),
             emqtt:disconnect(Client, ?RC_UNSPECIFIED_ERROR)
@@ -723,6 +752,8 @@ mqtt_opts([{ssl, Bool}|Opts], Acc) ->
     mqtt_opts(Opts, [{ssl, Bool}|Acc]);
 mqtt_opts([{lowmem, Bool}|Opts], Acc) ->
     mqtt_opts(Opts, [{low_mem, Bool} | Acc]);
+mqtt_opts([{qoe, Bool}|Opts], Acc) ->
+    mqtt_opts(Opts, [{with_qoe_metrics, Bool} | Acc]);
 mqtt_opts([{inflight, InFlight0}|Opts], Acc) ->
     InFlight = case InFlight0 of
                    0 -> infinity;
@@ -950,3 +981,16 @@ addr_to_list(Input) ->
 shard_addr(N, AddrList) ->
     Offset = N rem length(AddrList),
     lists:nth(Offset + 1, AddrList).
+
+quic_opts(Opts, ClientId) when is_binary(ClientId) ->
+   case proplists:get_value(nst_dets_file, Opts, undefined) of
+      undefined -> [];
+      _Filename ->
+         case ets:lookup(quic_clients_nsts, ClientId) of
+            [{ClientId, Ticket}] ->
+               io:format("Found load nst for ~p~n", [ClientId]),
+               [{nst, Ticket}];
+            [] ->
+               []
+         end
+   end.
