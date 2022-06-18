@@ -306,6 +306,7 @@ main(conn, Opts) ->
 
 start(PubSub, Opts) ->
     ets:new(quic_clients_nsts, [named_table, public, ordered_set]),
+    ets:new(qoe_store, [named_table, public, ordered_set]),
     case proplists:get_value(nst_dets_file, Opts, undefined) of
        undefined ->
           {ok, _DRef} = dets:open_file(dets_quic_nsts, [{file, "/tmp/quic_clients_nsts.dets"}]);
@@ -349,7 +350,7 @@ start(PubSub, Opts) ->
                   end, lists:seq(1, NoWorkers)),
     timer:send_interval(1000, stats),
     maybe_spawn_gc_enforcer(Opts),
-    main_loop(erlang:monotonic_time(millisecond), _Count = 0).
+    main_loop(erlang:monotonic_time(millisecond), Count).
 
 prepare(PubSub, Opts) ->
     Sname = list_to_atom(lists:flatten(io_lib:format("~p-~p-~p", [?MODULE, PubSub, rand:uniform(1000)]))),
@@ -384,19 +385,42 @@ init() ->
     put({stats, connect_fail}, InitS).
 
 
-main_loop(Uptime, Count0) ->
+main_loop(Uptime, Count) ->
     receive
         publish_complete ->
             return_print("publish complete", []);
         stats ->
             ets:to_dets(quic_clients_nsts, dets_quic_nsts),
             print_stats(Uptime),
+            maybe_print_qoe(Count),
             garbage_collect(),
-            main_loop(Uptime, Count0);
+            main_loop(Uptime, Count);
         Msg ->
             print("main_loop_msg: ~p~n", [Msg]),
-            main_loop(Uptime, Count0)
+            main_loop(Uptime, Count)
     end.
+
+maybe_print_qoe(Count) ->
+   %% latency statistic for
+   %% - handshake
+   %% - conn
+   %% - sub
+   case ets:info(qoe_store, size) of
+      Count ->
+         do_print_qoe(ets:tab2list(qoe_store));
+      _ ->
+         skip
+   end.
+do_print_qoe([]) ->
+   skip;
+do_print_qoe(Data) ->
+   {H, C, S} = lists:unzip3([ V || {_C, V} <-Data]),
+   lists:foreach(
+     fun({Name, X}) ->
+           io:format("~p, avg: ~pms, P95: ~pms, Max: ~pms ~n",
+                     [Name, lists:sum(X)/length(X), p95(X), lists:max(X)])
+     end, [{handshake, H}, {connect, C}, {subscribe, S}]),
+   lists:foreach(fun({Client, _}) -> ets:delete(qoe_store, Client) end, Data).
 
 print_stats(Uptime) ->
     [print_stats(Uptime, Cnt) ||
@@ -692,7 +716,12 @@ subscribe(Client, N, Opts) ->
               , connected := ConnTs
               , subscribed := SubTs
               }  ->
-                io:format("~n latency: handshake: ~p conn: ~p , sub: ~p~n", [HSTs - StartTs, ConnTs - StartTs, SubTs - StartTs]),
+                ElapsedHandshake = HSTs - StartTs,
+                ElapsedConn = ConnTs - StartTs,
+                ElapsedSub = SubTs - StartTs,
+                true = ets:insert(qoe_store, {proplists:get_value(client_id, Opts),
+                                              {ElapsedHandshake, ElapsedConn, ElapsedSub}
+                                             }),
                 ok
           end;
         {error, Reason} ->
@@ -988,9 +1017,16 @@ quic_opts(Opts, ClientId) when is_binary(ClientId) ->
       _Filename ->
          case ets:lookup(quic_clients_nsts, ClientId) of
             [{ClientId, Ticket}] ->
-               io:format("Found load nst for ~p~n", [ClientId]),
                [{nst, Ticket}];
             [] ->
                []
          end
    end.
+
+-spec p95([integer()]) -> integer().
+p95(List)->
+   percentile(List, 0.95).
+percentile(Input, P) ->
+   Len = length(Input),
+   Pos = trunc(Len * P),
+   lists:nth(Pos, lists:sort(Input)).
