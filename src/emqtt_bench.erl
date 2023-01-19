@@ -79,6 +79,8 @@
           "payload size"},
          {message, $m, "message", string,
           "set the message content for publish"},
+         {topics_payload, undefined, "topics-payload", string,
+          "json file defines topics and payloads"},
          {qos, $q, "qos", {integer, 0},
           "subscribe qos"},
          {qoe, $Q, "qoe", {boolean, false},
@@ -360,6 +362,7 @@ start(PubSub, Opts) ->
                        1000 * NoWorkers div ConnRate
                end,
     PayloadHdrs = parse_payload_hdrs(Opts),
+    TopicPayload = parse_topics_payload(Opts),
     io:format("Start with ~p workers, addrs pool size: ~p and req interval: ~p ms ~n~n",
               [NoWorkers, NoAddrs, Interval]),
     true = (Interval >= 1),
@@ -373,7 +376,8 @@ start(PubSub, Opts) ->
                                       end,
                           WOpts = replace_opts(Opts, [{startnumber, StartNumber},
                                                       {interval, Interval},
-                                                      {payload_hdrs, PayloadHdrs}
+                                                      {payload_hdrs, PayloadHdrs},
+                                                      {topics_payload, TopicPayload}
                                                      ] ++ CountParm),
                           proc_lib:spawn(?MODULE, run, [self(), PubSub, WOpts, AddrList, HostList])
                   end, lists:seq(1, NoWorkers)),
@@ -595,6 +599,7 @@ connect(Parent, N, PubSub, Opts) ->
     ConnectFun = connect_fun(Opts),
     ConnRet = emqtt:ConnectFun(Client),
     ContinueFn = fun() -> loop(Parent, N, Client, PubSub, loop_opts(AllOpts)) end,
+    TopicPayload = proplists:get_value(topics_payload, Opts),
     case ConnRet of
         {ok, _Props} ->
             Res =
@@ -602,9 +607,13 @@ connect(Parent, N, PubSub, Opts) ->
                     conn -> ok;
                     sub -> subscribe(Client, N, AllOpts);
                     pub -> case MRef of
-                               undefined ->
+                              undefined when TopicPayload == undefined ->
                                    erlang:send_after(RandomPubWaitMS, self(), publish);
-                               _ ->
+                              undefined ->
+                                 maps:map(fun(TopicName,  #{name := TopicName}) ->
+                                                erlang:send_after(RandomPubWaitMS, self(), {publish, TopicName})
+                                          end, TopicPayload);
+                              _ ->
                                    %% send `publish' only when all publishers
                                    %% are in place.
                                    ok
@@ -679,6 +688,19 @@ loop(Parent, N, Client, PubSub, Opts) ->
             inc_counter(recv),
             maybe_check_payload_hdrs(Payload, proplists:get_value(payload_hdrs, Opts)),
             loop(Parent, N, Client, PubSub, Opts);
+        {publish, TopicName} = Trigger when is_binary(TopicName) ->
+            TopicSpec = maps:get(TopicName, proplists:get_value(topics_payload, Opts)),
+            case publish_topic(Client, TopicName, TopicSpec, Opts) of
+               ok ->
+                  inc_counter(pub),
+                  %% Perfer not to schedule with back pressure
+                  erlang:send_after(maps:get(interval_ms, TopicSpec), self(), Trigger),
+                  ok;
+               _ ->
+                  Parent ! publish_complete,
+                  exit(normal)
+            end,
+            loop(Parent, N, Client, PubSub, Opts);
         {'EXIT', _Client, normal} ->
             ok;
         {'EXIT', _Client, {shutdown, {transport_down, unreachable}}} ->
@@ -735,6 +757,9 @@ bump_publish_attempt_counter() ->
     NewCount.
 
 schedule_next_publish(Interval) ->
+   schedule_next_publish(Interval, publish).
+
+schedule_next_publish(Interval, Trigger) ->
     PubAttempted = bump_publish_attempt_counter(),
     BeginTime = get_publish_begin_time(),
     NextTime = BeginTime + PubAttempted * Interval,
@@ -742,8 +767,8 @@ schedule_next_publish(Interval) ->
     Remain = NextTime - NowT,
     Interval > 0 andalso Remain < 0 andalso inc_counter(pub_overrun),
     case Remain > 0 of
-        true -> _ = erlang:send_after(Remain, self(), publish);
-        false -> self() ! publish
+        true -> _ = erlang:send_after(Remain, self(), Trigger);
+        false -> self() ! Trigger
     end,
     ok.
 
@@ -805,6 +830,24 @@ publish(Client, Opts) ->
       {ok, _} -> ok;
       {error, Reason} -> {error, Reason}
    end.
+
+
+publish_topic(Client, Topic, #{ name := Topic
+                              , qos := QoS
+                              , is_inject_ts := IsTS
+                              , payload := PayloadTemplate
+                              }, ClientOpts) ->
+   ok = ensure_publish_begin_time(),
+   NewPayload = case IsTS of
+                   true -> PayloadTemplate#{<<"timestamp">> => erlang:system_time(millisecond)};
+                   false -> PayloadTemplate
+                end,
+   case emqtt:publish(Client, feed_var(Topic, ClientOpts), jsx:encode(NewPayload), [{qos, QoS}]) of
+      ok -> ok;
+      {ok, _} -> ok;
+      {error, Reason} -> {error, Reason}
+   end.
+
 
 session_property_opts(Opts) ->
     case session_property_opts(Opts, #{}) of
@@ -1002,6 +1045,7 @@ loop_opts(Opts) ->
                          lists:member(K, [ interval_of_msg
                                          , payload
                                          , payload_hdrs
+                                         , topics_payload
                                          , qos
                                          , retain
                                          , topic
@@ -1198,4 +1242,44 @@ validate_payload_hdrs([Hdr | T]) ->
          validate_payload_hdrs(T);
       false ->
          error({unsupp_payload_hdr, Hdr})
+   end.
+
+
+-spec parse_topics_payload(proplists:proplist()) -> #{Name :: string() =>  #{name := string(),
+                                                                             interval_ms := non_neg_integer(),
+                                                                             qos := 0 | 1 |_2,
+                                                                             is_inject_ts := boolean(), payload := string()
+                                                                            }}.
+
+
+parse_topics_payload(Opts) ->
+   case proplists:get_value(topics_payload, Opts, []) of
+      [] -> [];
+      Filename ->
+         {ok, Content} = file:read_file(Filename),
+         #{<<"topics">> := TopicSpecs} = jsx:decode(Content),
+         %% Example
+         %%    #{<<"topics">> =>
+         %% [#{<<"inject_timestamp">> => true,<<"interval_ms">> => <<"1000">>,
+         %%    <<"name">> => <<"Topic1">>,
+         %%    <<"payload">> =>
+         %%        #{<<"foo">> => <<"bar">>,<<"timestamp">> => <<"0">>}},
+         %%  #{<<"inject_timestamp">> => true,<<"interval_ms">> => <<"500">>,
+         %%    <<"name">> => <<"Topic2">>,
+         %%    <<"payload">> =>
+         %%        #{<<"foo">> => <<"bar">>,<<"timestamp">> => <<"0">>}}]}
+
+         lists:foldl(fun(#{ <<"name">> := TopicName,
+                            <<"inject_timestamp">> := WithTS,
+                            <<"interval_ms">> := IntervalMS,
+                            <<"QoS">> := QoS,
+                            <<"payload">> := Payload}, Acc) ->
+                           Acc#{TopicName =>
+                                   #{ name => TopicName
+                                    , interval_ms => binary_to_integer(IntervalMS)
+                                    , is_inject_ts => WithTS
+                                    , qos => QoS
+                                    , payload => Payload
+                                    }}
+                     end, #{} ,TopicSpecs)
    end.
