@@ -244,6 +244,12 @@
          {quic, undefined, "quic", {boolean, false},
           "QUIC transport"},
          {nst_dets_file, undefined, "load-qst", string, "load quic session tickets from dets file"},
+         {payload_hdrs, undefined, "payload-hdrs", {string, []},
+          "Handle the payload header from received message. (implicit subscribtion at broker side)"
+          "Publish side must have the same option enabled in the same order. "
+          "cnt64: Check the counter is strictly increasing. "
+          "ts: publish latency counting."
+         },
          {ifaddr, undefined, "ifaddr", string,
           "local ipaddress or interface address"},
          {prefix, undefined, "prefix", string, ?PREFIX_DESC},
