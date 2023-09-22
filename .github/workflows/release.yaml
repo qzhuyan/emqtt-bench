@@ -15,6 +15,7 @@ on:
 
 jobs:
   docker:
+    if: github.event.repository.fork == false
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -117,6 +118,10 @@ jobs:
           - macos-12
         otp:
           - 25.3.2-1
+        is_fork: ${{ github.event.repository.fork }}
+        exclude:
+          - os: macos-12-arm64
+            is_fork: true
 
     runs-on: ${{ matrix.macos }}
 
