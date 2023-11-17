@@ -179,7 +179,7 @@ jobs:
     runs-on: ubuntu-latest
     needs:
       - linux
-      - mac
+      #- mac
     if: github.event_name == 'push' || inputs.publish_release_artifacts
 
     steps:
