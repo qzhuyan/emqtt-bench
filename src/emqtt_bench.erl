@@ -49,6 +49,14 @@
 -define(COMMON_OPTS,
         [{help, undefined, "help", boolean,
           "help information"},
+         {active, $A, "active", {string, "once"},
+          "How active polling of client port:"
+          "- \"once\": Legacy default value. for high concurrent clients and low freq msg per client."
+          "- \"true\": Very active (suggested). optimized for full speed, good for high freq msg per client and balanced scheduling."
+          "- \"false\": Disable receiving."
+          "- 100: Start slow but get optimized after 100 network packets received."
+          "* Use other int value for fine tune."
+         },
          {dist, $d, "dist", boolean,
           "enable distribution port"},
          %% == Traffic related ==
@@ -1038,6 +1046,14 @@ tcp_opts(Opts) ->
     tcp_opts(Opts, []).
 tcp_opts([], Acc) ->
     Acc;
+tcp_opts([{active, V} | Opts], Acc) ->
+    Active = case V of
+                 "once" -> once;
+                 "true" -> true;
+                 "false" -> false;
+                 Int -> list_to_integer(Int)
+             end,
+    tcp_opts(Opts, [{active, Active} | Acc]);
 tcp_opts([{lowmem, true} | Opts], Acc) ->
     tcp_opts(Opts, [{recbuf, 64} , {sndbuf, 64} | Acc]);
 tcp_opts([{ifaddr, IfAddr} | Opts], Acc) ->
