@@ -1055,7 +1055,7 @@ tcp_opts([{active, V} | Opts], Acc) ->
              end,
     tcp_opts(Opts, [{active, Active} | Acc]);
 tcp_opts([{lowmem, true} | Opts], Acc) ->
-    tcp_opts(Opts, [{recbuf, 64} , {sndbuf, 64} | Acc]);
+    tcp_opts(Opts, [{recbuf, 64} , {sndbuf, 64}, {buffer, 200} | Acc]);
 tcp_opts([{ifaddr, IfAddr} | Opts], Acc) ->
     case inet_parse:address(IfAddr) of
         {ok, IpAddr} ->
