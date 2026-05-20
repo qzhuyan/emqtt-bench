@@ -10,7 +10,7 @@ case "$UNAME" in
         DIST='macos'
         VERSION_ID="$(sw_vers | grep 'ProductVersion' | cut -d':' -f 2 | cut -d'.' -f1 | tr -d ' \t')"
         SYSTEM="${DIST}${VERSION_ID}"
-        EXT='zip'
+        EXT='tar.gz'
         ;;
     Linux)
         # /etc/os-release on amazon linux 2 contains both rhel and centos strings
