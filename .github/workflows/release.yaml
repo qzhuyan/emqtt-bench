@@ -162,14 +162,14 @@ jobs:
         run: |
           set -e
           mkdir test-release
-          cp ./emqtt-bench*.zip test-release
+          cp ./emqtt-bench*.tar.gz test-release
           cd test-release
-          unzip -q ./emqtt-bench*.zip
+          tar zxvf ./emqtt-bench*.tar.gz
           bin/emqtt_bench
       - uses: actions/upload-artifact@26f96dfa697d77e81fd5907df203aa23a56210a8 # v4.3.0
         with:
           name: "emqtt-bench-${{ matrix.otp }}-${{ matrix.os }}"
-          path: ./*.zip
+          path: ./*.tar.gz
 
   release:
     runs-on: ubuntu-latest
